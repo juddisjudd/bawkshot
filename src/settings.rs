@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
-use gpui_kit::component::TitleBar;
+use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::switch::Switch;
+use gpui_kit::component::{Icon, Sizable, TitleBar};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -11,6 +12,8 @@ use crate::assets::MARK;
 use crate::config::{Config, GIF_RATES, Trigger, VIDEO_RATES};
 use crate::shell::{Shell, shell};
 use crate::theme::{self, Mode, Palette, palette};
+use crate::updater::VERSION;
+use crate::updates::{UpdateState, Updates};
 use crate::{autostart, platform, recorder};
 
 /// Keeps its own copy of the settings: the shell can be mid-update, and so unreadable, while this window draws.
@@ -21,6 +24,8 @@ pub struct SettingsView {
     ffmpeg: Option<PathBuf>,
     autostart: bool,
     autostart_error: Option<String>,
+    updates: Entity<Updates>,
+    update: UpdateState,
     save_dir: Entity<InputState>,
     ffmpeg_path: Entity<InputState>,
     hotkeys: Vec<(Trigger, Entity<InputState>)>,
@@ -30,6 +35,7 @@ pub struct SettingsView {
 pub fn open(
     config: Config,
     errors: Vec<(Trigger, String)>,
+    updates: Entity<Updates>,
     cx: &mut App,
 ) -> Option<AnyWindowHandle> {
     let bounds = Bounds::centered(None, size(px(640.), px(760.)), cx);
@@ -41,7 +47,7 @@ pub fn open(
     };
     let opened = open_window(options, cx, |window, cx| {
         window.set_window_title("bawkshot settings");
-        cx.new(|cx| SettingsView::new(config, errors, window, cx))
+        cx.new(|cx| SettingsView::new(config, errors, updates, window, cx))
     });
     let (handle, _) = opened
         .map_err(|err| log::error!("could not open settings: {err}"))
@@ -62,6 +68,7 @@ impl SettingsView {
     fn new(
         config: Config,
         errors: Vec<(Trigger, String)>,
+        updates: Entity<Updates>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -83,6 +90,10 @@ impl SettingsView {
                 }
                 this.config = state.config.clone();
                 this.errors = state.hotkey_errors.clone();
+                cx.notify();
+            }),
+            cx.observe(&updates, |this, updates, cx| {
+                this.update = updates.read(cx).state.clone();
                 cx.notify();
             }),
             cx.subscribe_in(
@@ -132,6 +143,8 @@ impl SettingsView {
             ffmpeg: recorder::locate(&config.ffmpeg_path),
             autostart: autostart::enabled(),
             autostart_error: None,
+            update: updates.read(cx).state.clone(),
+            updates,
             config,
             errors,
             save_dir,
@@ -244,25 +257,175 @@ impl SettingsView {
             .items_center()
             .gap_2()
             .child(div().flex_1().child(Input::new(input)))
+            .child(button(id, "browse", false, p).on_click(cx.listener(
+                move |this, _, window, cx| this.browse(target.clone(), folder, store, window, cx),
+            )))
+    }
+
+    /// This build's version, what the last check found, and the one step that comes next.
+    fn update_row(&self, p: &Palette) -> Div {
+        let (icon, color, text): (IconName, Hsla, String) = match &self.update {
+            UpdateState::Idle => (IconName::RefreshCw, p.text_weak, "not checked yet".into()),
+            UpdateState::Checking => (
+                IconName::RefreshCw,
+                p.text_weak,
+                "checking for updates…".into(),
+            ),
+            UpdateState::Current => (
+                IconName::CircleCheck,
+                p.text_weak,
+                "you have the newest version".into(),
+            ),
+            UpdateState::Available(release) => (
+                IconName::ArrowDownToLine,
+                p.yolk,
+                format!("bawkshot {} is out", release.version),
+            ),
+            UpdateState::Downloading {
+                version,
+                done,
+                total,
+            } => (
+                IconName::ArrowDownToLine,
+                p.yolk,
+                format!(
+                    "downloading {version}… {} of {} MB",
+                    megabytes(*done),
+                    megabytes(*total)
+                ),
+            ),
+            UpdateState::Ready { version, .. } => (
+                IconName::CircleCheck,
+                p.yolk,
+                format!(
+                    "{version} is installed. restart to use it. a running recording is saved first."
+                ),
+            ),
+            UpdateState::Failed(error) => (IconName::CircleAlert, p.danger, error.clone()),
+        };
+        let updates = self.updates.clone();
+        let action = match &self.update {
+            UpdateState::Idle | UpdateState::Current => Some(
+                button("check-now", "check now", false, p)
+                    .on_click(move |_, _, cx| updates.update(cx, |updates, cx| updates.check(cx))),
+            ),
+            UpdateState::Failed(_) => Some(
+                button("check-now", "try again", false, p)
+                    .on_click(move |_, _, cx| updates.update(cx, |updates, cx| updates.check(cx))),
+            ),
+            UpdateState::Available(_) => Some(
+                button("install-update", "update", true, p).on_click(move |_, _, cx| {
+                    updates.update(cx, |updates, cx| updates.install(cx))
+                }),
+            ),
+            UpdateState::Ready { .. } => Some(
+                button("restart", "restart now", true, p).on_click(move |_, _, cx| {
+                    updates.update(cx, |updates, cx| updates.restart(cx))
+                }),
+            ),
+            UpdateState::Checking | UpdateState::Downloading { .. } => None,
+        };
+        let notes = match &self.update {
+            UpdateState::Available(release) => Some(release.page.clone()),
+            _ => None,
+        };
+        let fraction = match &self.update {
+            UpdateState::Downloading { done, total, .. } => {
+                Some((*done as f32 / (*total).max(1) as f32).min(1.0))
+            }
+            _ => None,
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
             .child(
                 div()
-                    .id(id)
-                    .h(px(32.))
-                    .px(px(12.))
                     .flex()
                     .items_center()
-                    .rounded(px(4.))
-                    .border_1()
+                    .justify_between()
+                    .gap_4()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_color(p.text_strong)
+                                    .child(format!("bawkshot {VERSION}")),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .pt(px(3.))
+                                            .child(Icon::new(icon).xsmall().text_color(color)),
+                                    )
+                                    .child(note(text, color).flex_1().min_w_0()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .gap_2()
+                            .children(notes.map(|page| {
+                                button("release-notes", "what's new", false, p)
+                                    .on_click(move |_, _, cx| cx.open_url(&page))
+                            }))
+                            .children(action),
+                    ),
+            )
+            .children(fraction.map(|fraction| {
+                div()
+                    .h(px(3.))
+                    .w_full()
+                    .rounded_full()
+                    .bg(p.border_weak)
+                    .child(
+                        div()
+                            .h_full()
+                            .rounded_full()
+                            .bg(p.yolk)
+                            .w(relative(fraction)),
+                    )
+            }))
+    }
+}
+
+fn megabytes(bytes: u64) -> String {
+    format!("{:.1}", bytes as f64 / (1024.0 * 1024.0))
+}
+
+fn button(id: &'static str, label: &'static str, primary: bool, p: &Palette) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(32.))
+        .px(px(12.))
+        .flex()
+        .flex_none()
+        .items_center()
+        .rounded(px(4.))
+        .cursor_pointer()
+        .child(label)
+        .map(|this| {
+            if primary {
+                this.bg(p.yolk)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.bg)
+                    .hover(|style| style.opacity(0.88))
+            } else {
+                this.border_1()
                     .border_color(p.border_weak)
                     .text_color(p.text_strong)
-                    .cursor_pointer()
                     .hover(|style| style.bg(p.bg_hover))
-                    .child("browse")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.browse(target.clone(), folder, store, window, cx)
-                    })),
-            )
-    }
+            }
+        })
 }
 
 fn section(title: &'static str, p: &Palette) -> Div {
@@ -487,6 +650,18 @@ impl Render for SettingsView {
                 ),
             );
 
+        let about = section("about", &p)
+            .child(self.update_row(&p))
+            .child(Self::toggle(
+                "check-updates",
+                "check for updates",
+                "looks on github when bawkshot starts, then once a day.",
+                config.check_updates,
+                |config, on| config.check_updates = on,
+                &p,
+                cx,
+            ));
+
         let title = div()
             .flex()
             .items_center()
@@ -526,7 +701,8 @@ impl Render for SettingsView {
                             .child(capture)
                             .child(recording)
                             .child(hotkeys)
-                            .child(app),
+                            .child(app)
+                            .child(about),
                     ),
                 ),
             )

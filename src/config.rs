@@ -194,6 +194,7 @@ pub struct Config {
     pub video_fps: u32,
     pub gif_fps: u32,
     pub record_cursor: bool,
+    pub check_updates: bool,
 }
 
 impl Default for Config {
@@ -211,6 +212,7 @@ impl Default for Config {
             video_fps: 30,
             gif_fps: 15,
             record_cursor: true,
+            check_updates: true,
         }
     }
 }
@@ -313,5 +315,6 @@ mod tests {
         assert_eq!(config.hotkeys.region, "f9");
         assert_eq!(config.hotkeys.record_gif, "ctrl+shift+printscreen");
         assert_eq!(config.video_fps, 30);
+        assert!(config.check_updates);
     }
 }

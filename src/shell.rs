@@ -22,6 +22,7 @@ use crate::overlay::{RegionEvent, RegionOverlay};
 use crate::pill::{PILL_HEIGHT, PILL_WIDTH, PillEvent, RecordingPill};
 use crate::platform::{Outline, WindowState};
 use crate::recorder::{self, Ffmpeg, Health, Recording, ScreenFrames};
+use crate::updates::{UpdateFound, UpdateState, Updates};
 use crate::{editor, imaging, platform, settings};
 
 /// An open tray menu is still fading out when its item fires, so a capture waits for it to clear.
@@ -29,6 +30,7 @@ const TRAY_DELAY: Duration = Duration::from_millis(300);
 /// How often a running recording is checked on, and its outline moved after a followed window.
 const WATCH: Duration = Duration::from_millis(100);
 const SAVED_TAG: &str = "bawkshot-saved";
+const UPDATE_TAG: &str = "bawkshot-update";
 
 #[derive(Clone, Debug)]
 pub enum Command {
@@ -107,6 +109,7 @@ struct ActiveRecording {
 }
 struct Tray {
     stop: MenuItem,
+    settings: MenuItem,
     _icon: TrayIcon,
 }
 
@@ -114,6 +117,7 @@ struct Tray {
 pub struct Shell {
     pub config: Config,
     pub hotkey_errors: Vec<(Trigger, String)>,
+    updates: Entity<Updates>,
     hotkeys: Option<GlobalHotKeyManager>,
     registered: Vec<HotKey>,
     triggers: Arc<Mutex<HashMap<u32, Trigger>>>,
@@ -126,7 +130,7 @@ pub struct Shell {
     last_saved: Option<PathBuf>,
     settings: Option<AnyWindowHandle>,
     tray: Option<Tray>,
-    _quit: Subscription,
+    _subscriptions: [Subscription; 3],
 }
 
 struct ShellHandle(Entity<Shell>);
@@ -143,20 +147,23 @@ pub fn init(startup: Vec<Command>, cx: &mut App) {
     for command in startup {
         let _ = commands.try_send(command);
     }
-    let shell = cx.new(|cx| Shell::new(commands, cx));
+    let shell = cx.new(|cx| Shell::new(commands.clone(), cx));
     cx.set_global(ShellHandle(shell.clone()));
-    let revealer = shell.downgrade();
-    cx.on_system_notification_response(move |response, cx| {
-        if response.tag.as_ref() != SAVED_TAG {
-            return;
+    let (revealer, opener) = (shell.downgrade(), commands.clone());
+    cx.on_system_notification_response(move |response, cx| match response.tag.as_ref() {
+        SAVED_TAG => {
+            let saved = revealer
+                .read_with(cx, |shell, _| shell.last_saved.clone())
+                .ok()
+                .flatten();
+            if let Some(path) = saved {
+                cx.reveal_path(&path);
+            }
         }
-        let saved = revealer
-            .read_with(cx, |shell, _| shell.last_saved.clone())
-            .ok()
-            .flatten();
-        if let Some(path) = saved {
-            cx.reveal_path(&path);
+        UPDATE_TAG => {
+            let _ = opener.try_send(Command::Settings);
         }
+        _ => {}
     });
     cx.spawn(async move |cx| {
         while let Ok(command) = inbox.recv().await {
@@ -217,7 +224,8 @@ fn build_tray(commands: &async_channel::Sender<Command>) -> Option<Tray> {
     add("edit-clipboard", "edit the clipboard image");
     add("open-folder", "open the screenshots folder");
     let _ = menu.append(&PredefinedMenuItem::separator());
-    add("settings", "settings");
+    let settings = MenuItem::with_id("settings", SETTINGS_LABEL, true, None);
+    let _ = menu.append(&settings);
     add("quit", "quit bawkshot");
 
     let sender = commands.clone();
@@ -248,7 +256,22 @@ fn build_tray(commands: &async_channel::Sender<Command>) -> Option<Tray> {
         .build()
         .map_err(|err| log::error!("could not create the tray icon: {err}"))
         .ok()?;
-    Some(Tray { stop, _icon: icon })
+    Some(Tray {
+        stop,
+        settings,
+        _icon: icon,
+    })
+}
+
+const SETTINGS_LABEL: &str = "settings";
+
+/// The tray has no badge, so its settings entry says when an update is waiting there.
+fn settings_label(state: &UpdateState) -> &'static str {
+    match state {
+        UpdateState::Available(_) => "settings · update available",
+        UpdateState::Ready { .. } => "settings · restart to update",
+        _ => SETTINGS_LABEL,
+    }
 }
 
 impl Shell {
@@ -279,11 +302,28 @@ impl Shell {
             }
             async {}
         });
+        let updates = cx.new(|cx| Updates::new(config.check_updates, cx));
+        let found = cx.subscribe(&updates, |_, _, found: &UpdateFound, cx| {
+            let title = format!("bawkshot {} is out", found.0);
+            let body = "click here, or open settings from the tray icon, to update.";
+            notify_tagged(UPDATE_TAG, &title, body, cx);
+        });
+        let changed = cx.observe(&updates, |this, updates, cx| {
+            let label = settings_label(&updates.read(cx).state);
+            if let Some(tray) = this
+                .tray
+                .as_ref()
+                .filter(|tray| tray.settings.text() != label)
+            {
+                tray.settings.set_text(label);
+            }
+        });
 
         let mut this = Self {
             tray: build_tray(&commands),
             config,
             hotkey_errors: Vec::new(),
+            updates,
             hotkeys,
             registered: Vec::new(),
             triggers,
@@ -294,7 +334,7 @@ impl Shell {
             ffmpeg: None,
             last_saved: None,
             settings: None,
-            _quit: quit,
+            _subscriptions: [quit, found, changed],
         };
         this.register_hotkeys();
         if !this.hotkey_errors.is_empty() {
@@ -350,6 +390,9 @@ impl Shell {
         if self.config.hotkeys != before {
             self.register_hotkeys();
         }
+        let automatic = self.config.check_updates;
+        self.updates
+            .update(cx, |updates, cx| updates.set_automatic(automatic, cx));
         self.save();
         cx.notify();
     }
@@ -462,7 +505,8 @@ impl Shell {
                 .is_ok()
         });
         if !reused {
-            self.settings = settings::open(self.config.clone(), self.hotkey_errors.clone(), cx);
+            let (config, errors) = (self.config.clone(), self.hotkey_errors.clone());
+            self.settings = settings::open(config, errors, self.updates.clone(), cx);
         }
     }
 

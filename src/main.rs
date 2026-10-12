@@ -17,6 +17,10 @@ mod recorder;
 mod settings;
 mod shell;
 mod theme;
+mod updater;
+mod updates;
+
+use std::time::Duration;
 
 use gpui_kit::*;
 
@@ -102,9 +106,13 @@ fn startup_commands(args: impl Iterator<Item = String>) -> Vec<Command> {
 
 fn main() {
     logging::init();
-    let Some(_instance) = platform::single_instance() else {
+    let after_update = std::env::args().any(|arg| arg == updater::AFTER_UPDATE);
+    let patience = Duration::from_secs(if after_update { 30 } else { 0 });
+    let Some(_instance) = platform::single_instance(patience) else {
         return;
     };
+    updater::clean_up();
+    updater::sync_installed_version();
     platform::discard_launch_show_state();
     application()
         .with_assets(assets::AppAssets)

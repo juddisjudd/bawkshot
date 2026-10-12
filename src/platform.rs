@@ -3,6 +3,7 @@ use std::mem::size_of;
 use std::os::windows::io::AsRawHandle as _;
 use std::process::Child;
 use std::sync::Once;
+use std::time::{Duration, Instant};
 
 use gpui_kit::{App, Window};
 use image::RgbaImage;
@@ -54,11 +55,21 @@ pub struct Monitor {
 /// Holds the named mutex that marks this process as the running copy.
 pub struct Instance(#[allow(dead_code)] windows::Win32::Foundation::HANDLE);
 
-/// `None` when another copy already owns the tray icon and the hotkeys.
-pub fn single_instance() -> Option<Instance> {
-    unsafe {
-        let handle = CreateMutexW(None, true, w!("bawkshot-single-instance")).ok()?;
-        (GetLastError() != ERROR_ALREADY_EXISTS).then_some(Instance(handle))
+/// `None` when another copy still owns the tray icon and the hotkeys after `patience`, the time an update gives the old copy to leave.
+pub fn single_instance(patience: Duration) -> Option<Instance> {
+    let deadline = Instant::now() + patience;
+    loop {
+        unsafe {
+            let handle = CreateMutexW(None, true, w!("bawkshot-single-instance")).ok()?;
+            if GetLastError() != ERROR_ALREADY_EXISTS {
+                return Some(Instance(handle));
+            }
+            let _ = CloseHandle(handle);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 

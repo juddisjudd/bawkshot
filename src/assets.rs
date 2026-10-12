@@ -6,11 +6,14 @@ use gpui_kit::{AssetSource, Result, SharedString};
 icon_assets!(
     AppIcons,
     [
+        ArrowDownToLine,
         ArrowUpRight,
         BringToFront,
         Camera,
         Check,
         Circle,
+        CircleAlert,
+        CircleCheck,
         Copy,
         Crop,
         Droplet,
@@ -24,6 +27,7 @@ icon_assets!(
         PaintBucket,
         Pencil,
         Redo2,
+        RefreshCw,
         Save,
         SendToBack,
         Settings,

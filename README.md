@@ -21,8 +21,6 @@ You need Windows 10 or 11, 64-bit. bawkshot has no main window. Look for its ico
 
 **No installer?** Download `bawkshot-…-windows-x64.zip` instead. Unzip it anywhere and double-click `bawkshot.exe`.
 
-**To update,** quit bawkshot from its tray icon and run the newer installer. Your settings stay as they are.
-
 **To remove it,** open Windows Settings → Apps → Installed apps, find bawkshot and choose **Uninstall**. Your settings and captures stay.
 
 ### 2. Take a screenshot
@@ -54,6 +52,16 @@ A yellow outline and a small control show what is being recorded. Neither appear
 
 Right-click the tray icon, open **settings**, and turn on **start with windows**. The installer can do the same: tick **Start bawkshot when I sign in to Windows**.
 
+### 6. Stay up to date
+
+bawkshot looks for a new version on GitHub when it starts, and once a day after that. When one is out, you get a notification, and the tray menu shows **settings · update available**.
+
+1. Open **settings** and scroll to **about**.
+2. Press **update**.
+3. Press **restart now**. A recording in progress is saved first.
+
+Your settings stay as they are. To stop the checks, turn off **check for updates** in the same place.
+
 ## Everything it does
 
 - **Capture modes:** a region, every monitor in one image, the monitor under the pointer, the window that has focus, and the last region again.
@@ -65,6 +73,7 @@ Right-click the tray icon, open **settings**, and turn on **start with windows**
 - **After a capture:** open the editor, copy to the clipboard, save a PNG. Each one is a switch in settings. A finished recording is copied as a file, so it pastes into a chat or a folder.
 - **Hotkeys** for every capture mode and for both kinds of recording. Change them in settings.
 - **Open an image** from disk or from the clipboard to mark it up.
+- **Updates** itself from the releases page. Each download is checked against its SHA-256 checksum before it is installed.
 - **Themes:** dark, light, or follow Windows.
 - **Command line** to capture or record from a script.
 
@@ -133,6 +142,8 @@ Arguments are read when bawkshot starts. They do nothing if it is already runnin
 
 **Starting bawkshot again does nothing.** Only one copy runs at a time. Use the tray icon of the one that is running.
 
+**An update fails with "cannot write next to bawkshot.exe".** bawkshot is in a folder it can't change, such as `Program Files`. Move it somewhere of your own, such as `Documents`, or run the new installer.
+
 bawkshot has only been tried on displays at 100% scale.
 
 ## Where your things are
@@ -168,6 +179,8 @@ $env:LOG_LEVEL = "DEBUG"; $env:LOG_FILE = "$env:TEMP\bawkshot.log"; cargo run
 
 Set `BAWKSHOT_HOME` to a folder to keep a second copy's settings apart from your own.
 
+A copy run from `target` does not update itself; use git and cargo. To try the updater without publishing a release, copy a debug build out of `target` and set `BAWKSHOT_UPDATE_API` to an address that answers like GitHub's `releases/latest`. Release builds ignore that variable.
+
 The icon files in `assets/brand` are drawn from `icon.svg`. After you change it, run `cargo run --example brand`.
 
 ### Make a release
@@ -179,6 +192,8 @@ The version lives in `Cargo.toml`. To publish a new one, run this from a clean `
 ```
 
 It sets the version, commits, tags `v0.2.0` and pushes. The [release workflow](.github/workflows/release.yml) then tests and builds on Windows. It publishes the installer and a zip on the releases page, each with its SHA-256 checksum, with notes that GitHub generates. A tag that doesn't match the version in `Cargo.toml` fails the build.
+
+Copies that are already installed find the release by themselves. The updater downloads the zip, checks it, and swaps `bawkshot.exe` in place, so keep the zip and its `.sha256` file in every release.
 
 To try the workflow without publishing, start it by hand with `gh workflow run release.yml`. It builds the same files and keeps them on the run for 7 days.
 

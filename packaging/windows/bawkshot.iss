@@ -44,6 +44,10 @@ Name: "{autoprograms}\bawkshot"; Filename: "{app}\bawkshot.exe"
 [Registry]
 Root: HKCU; Subkey: "{#RunKey}"; ValueType: string; ValueName: "bawkshot"; ValueData: """{app}\bawkshot.exe"""; Tasks: startup
 
+[UninstallDelete]
+Type: files; Name: "{app}\bawkshot.old.exe"
+Type: files; Name: "{app}\bawkshot.new.exe"
+
 [Run]
 Filename: "{app}\bawkshot.exe"; Description: "Start bawkshot"; Flags: nowait postinstall skipifsilent
 
