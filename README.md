@@ -9,21 +9,21 @@ bawkshot is a Windows screenshot tool that lives in the tray. Press a hotkey, pi
 
 ## Get started
 
-### 1. Build and start
+### 1. Install
 
-There is no download yet, so you build it from source. You need:
+1. Open the [releases page](https://github.com/juddisjudd/bawkshot/releases) and download the newest `bawkshot-…-windows-x64-setup.exe`.
+2. Run it. It installs for your user only, so it does not ask for an administrator.
+3. Leave **Start bawkshot** ticked on the last page and click **Finish**.
 
-1. Windows 10 or 11, 64-bit.
-2. Rust 1.92 or later, with the MSVC toolchain.
-3. Visual Studio 2022 Build Tools with the **Desktop development with C++** workload.
+You need Windows 10 or 11, 64-bit. bawkshot has no main window. Look for its icon in the tray.
 
-Then:
+**"Windows protected your PC"?** bawkshot is not signed with a paid certificate yet, so Windows may warn you the first time. Click **More info**, then **Run anyway**.
 
-```sh
-cargo run --release
-```
+**No installer?** Download `bawkshot-…-windows-x64.zip` instead. Unzip it anywhere and double-click `bawkshot.exe`.
 
-The first build compiles GPUI and takes a few minutes. bawkshot has no main window. Look for its icon in the tray.
+**To update,** quit bawkshot from its tray icon and run the newer installer. Your settings stay as they are.
+
+**To remove it,** open Windows Settings → Apps → Installed apps, find bawkshot and choose **Uninstall**. Your settings and captures stay.
 
 ### 2. Take a screenshot
 
@@ -52,7 +52,7 @@ A yellow outline and a small control show what is being recorded. Neither appear
 
 ### 5. Start with Windows
 
-Right-click the tray icon, open **settings**, and turn on **start with windows**.
+Right-click the tray icon, open **settings**, and turn on **start with windows**. The installer can do the same: tick **Start bawkshot when I sign in to Windows**.
 
 ## Everything it does
 
@@ -139,6 +139,7 @@ bawkshot has only been tried on displays at 100% scale.
 
 | What | Where |
 | --- | --- |
+| The program, when you used the installer | `%LOCALAPPDATA%\Programs\bawkshot` |
 | Captures and recordings (change it under settings) | `Pictures\bawkshot` |
 | Settings and hotkeys | `%APPDATA%\bawkshot\config.json` |
 | What ffmpeg said about the last recording | `%APPDATA%\bawkshot\ffmpeg.log` |
@@ -150,12 +151,14 @@ To start fresh, quit bawkshot and delete the `%APPDATA%\bawkshot` folder.
 
 bawkshot is written in Rust with [GPUI Kit](https://gpui-kit.com). Capture, the tray, hotkeys and the startup entry go straight to Win32. Recording pipes raw frames to ffmpeg.
 
+To build it you need Rust 1.92 or later with the MSVC toolchain, and Visual Studio 2022 Build Tools with the **Desktop development with C++** workload.
+
 ```sh
 cargo run --release       # build and start
 cargo test                # run the tests
 ```
 
-The tests drive the overlay, the editor and the recording control in headless windows. The recorder tests run a real ffmpeg on a test pattern, and pass without doing anything when ffmpeg is not installed.
+The first build compiles GPUI and takes a few minutes. The tests drive the overlay, the editor and the recording control in headless windows. The recorder tests run a real ffmpeg on a test pattern, and pass without doing anything when ffmpeg is not installed.
 
 To see errors, set two environment variables before you start it. In PowerShell:
 
@@ -167,6 +170,27 @@ Set `BAWKSHOT_HOME` to a folder to keep a second copy's settings apart from your
 
 The icon files in `assets/brand` are drawn from `icon.svg`. After you change it, run `cargo run --example brand`.
 
+### Make a release
+
+The version lives in `Cargo.toml`. To publish a new one, run this from a clean `main`:
+
+```powershell
+.\scripts\release.ps1 -Version 0.2.0
+```
+
+It sets the version, commits, tags `v0.2.0` and pushes. The [release workflow](.github/workflows/release.yml) then tests and builds on Windows. It publishes the installer and a zip on the releases page, each with its SHA-256 checksum, with notes that GitHub generates. A tag that doesn't match the version in `Cargo.toml` fails the build.
+
+To try the workflow without publishing, start it by hand with `gh workflow run release.yml`. It builds the same files and keeps them on the run for 7 days.
+
+The installer comes from [`packaging/windows/bawkshot.iss`](packaging/windows/bawkshot.iss), an [Inno Setup](https://jrsoftware.org/isinfo.php) script. To build the installer and the zip on your own PC, install Inno Setup 6, then run:
+
+```powershell
+cargo build --release
+.\packaging\windows\package.ps1
+```
+
+Both files land in `dist`.
+
 ## Credits
 
 - [GPUI Kit](https://github.com/longbridge/gpui-kit) (Apache-2.0) and Zed's GPUI draw the interface.
@@ -175,6 +199,7 @@ The icon files in `assets/brand` are drawn from `icon.svg`. After you change it,
 - [FFmpeg](https://ffmpeg.org) encodes the recordings. It is not bundled.
 - [IBM Plex](https://github.com/IBM/plex) Mono and Sans (SIL Open Font License, `assets/fonts/OFL.txt`) are the typefaces.
 - [Lucide](https://lucide.dev) (ISC) icons.
+- [Inno Setup](https://jrsoftware.org/isinfo.php) builds the installer.
 - The capture modes take after [ShareX](https://github.com/ShareX/ShareX). The editor takes after the art mode in [scalpel](https://github.com/scalpelpoe/scalpel).
 
 ## License
