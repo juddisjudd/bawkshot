@@ -338,11 +338,12 @@ pub fn title_bar(editor: &Editor, cx: &mut Context<Editor>) -> impl IntoElement 
         .cursor_pointer()
         .hover(|style| style.bg(p.bg_hover).text_color(p.text_strong))
         .child(format!("{:.0}%", editor.zoom_percent()))
+        .debug_selector(|| "zoom".to_string())
         .tooltip(hint("switch between fit and 100% · ctrl 0 / ctrl 1"))
         .on_click(cx.listener(|this, _, _, cx| this.toggle_fit(cx)));
 
-    let done = div()
-        .id("done")
+    let save = div()
+        .id("save")
         .h(px(26.))
         .px(px(12.))
         .ml(px(6.))
@@ -356,15 +357,17 @@ pub fn title_bar(editor: &Editor, cx: &mut Context<Editor>) -> impl IntoElement 
         .text_color(p.bg)
         .cursor_pointer()
         .hover(|style| style.opacity(0.88))
-        .child("done")
-        .tooltip(hint("copy, save and close · enter"))
-        .on_click(cx.listener(|this, _, window, cx| this.export(Export::Done, window, cx)));
+        .child("save")
+        .tooltip(hint("save and close · enter"))
+        .on_click(cx.listener(|this, _, window, cx| this.export(Export::SaveAndClose, window, cx)));
 
+    // The title bar drags the window from anywhere on it, so the buttons occlude it to get their clicks.
     let actions = div()
         .flex()
         .items_center()
         .gap(px(2.))
         .pr(px(10.))
+        .occlude()
         .child(zoom)
         .child(divider(&p))
         .child(
@@ -401,11 +404,7 @@ pub fn title_bar(editor: &Editor, cx: &mut Context<Editor>) -> impl IntoElement 
             )
             .on_click(cx.listener(|this, _, window, cx| this.export(Export::Copy, window, cx))),
         )
-        .child(
-            icon_button("save", IconName::Save, "save · ctrl S", false, true, &p)
-                .on_click(cx.listener(|this, _, window, cx| this.export(Export::Save, window, cx))),
-        )
-        .child(done);
+        .child(save);
 
     TitleBar::new()
         .h(px(40.))

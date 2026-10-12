@@ -25,7 +25,7 @@ bawkshot has no main window. Look for its icon in the tray. Right-click it for e
 | `Shift+PrtSc` | start or stop a video recording |
 | `Ctrl+Shift+PrtSc` | start or stop a GIF recording |
 
-Change them under **settings**. In the editor, press **Enter** to copy, save and close.
+Change them under **settings**. In the editor, press **Enter** to save and close.
 
 Recording needs [ffmpeg](https://ffmpeg.org) on your `PATH`. One way to install it is `winget install ffmpeg`.
 

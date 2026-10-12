@@ -206,7 +206,7 @@ pub enum Export {
     Copy,
     Save,
     SaveAs,
-    Done,
+    SaveAndClose,
 }
 
 enum Gesture {
@@ -990,7 +990,7 @@ impl Editor {
             (true, _, "=" | "+") => self.zoom_step(1.25, cx),
             (true, _, "-") => self.zoom_step(0.8, cx),
             (false, _, "delete" | "backspace") => self.delete_selection(cx),
-            (false, _, "enter") => self.export(Export::Done, window, cx),
+            (false, _, "enter") => self.export(Export::SaveAndClose, window, cx),
             (false, _, "escape") => {
                 if self.gesture.take().is_some() {
                     self.doc.discard_unchanged();
@@ -1026,7 +1026,7 @@ impl Editor {
         }
     }
 
-    /// Flattens the markup off the UI thread, then copies, saves or both.
+    /// Flattens the markup off the UI thread, then copies or saves it.
     pub(super) fn export(&mut self, what: Export, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy {
             return;
@@ -1035,15 +1035,11 @@ impl Editor {
         let config = shell(cx).read(cx).config.clone();
         let target = match what {
             Export::Copy | Export::SaveAs => None,
-            Export::Save => Some(
+            Export::Save | Export::SaveAndClose => Some(
                 self.saved
                     .clone()
                     .unwrap_or_else(|| config.next_file("png")),
             ),
-            Export::Done => self
-                .saved
-                .clone()
-                .or_else(|| config.save_to_disk.then(|| config.next_file("png"))),
         };
         let prompt = (what == Export::SaveAs).then(|| {
             let _ = std::fs::create_dir_all(&config.save_dir);
@@ -1053,7 +1049,7 @@ impl Editor {
         let elements = self.doc.elements.clone();
         let untouched = elements.is_empty() && crop == self.doc.full();
         let metrics = paint::text_metrics(window);
-        let copy = matches!(what, Export::Copy | Export::Done);
+        let copy = what == Export::Copy;
         self.busy = true;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
@@ -1099,7 +1095,7 @@ impl Editor {
                 if target.is_some() {
                     this.saved = target;
                 }
-                if what == Export::Done {
+                if what == Export::SaveAndClose {
                     window.remove_window();
                     return;
                 }
@@ -1723,6 +1719,20 @@ mod tests {
         cx.simulate_mouse_move(above, MouseButton::Left, Modifiers::none());
         cx.simulate_mouse_up(above, MouseButton::Left, Modifiers::none());
         assert!(elements(&view, cx).is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn title_bar_buttons_click_instead_of_dragging_the_window(cx: &mut TestAppContext) {
+        let (view, cx) = editor(cx);
+        let button = cx
+            .debug_bounds("zoom")
+            .expect("the zoom button is drawn")
+            .center();
+        cx.simulate_mouse_down(button, MouseButton::Left, Modifiers::none());
+        let nudged = point(button.x + px(2.), button.y);
+        cx.simulate_mouse_move(nudged, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(nudged, MouseButton::Left, Modifiers::none());
+        assert!(!view.read_with(cx, |editor, _| editor.fit));
     }
 
     #[gpui_kit::test]
