@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::WindowExt;
@@ -15,7 +16,7 @@ use super::effects;
 use super::element::{Color, Element, Handle, PALETTE, Shape, snap_angle, snap_square};
 use super::paint::{self, Space};
 use super::render;
-use crate::geom::{Pt, RectF, RectI};
+use crate::geom::{Pt, RectF, RectI, pt};
 use crate::shell::shell;
 use crate::theme::palette;
 use crate::{imaging, platform};
@@ -28,6 +29,8 @@ const HANDLE_REACH: f32 = 8.0;
 const HIT_SLOP: f32 = 5.0;
 const MIN_ZOOM: f32 = 0.05;
 const MAX_ZOOM: f32 = 32.0;
+/// How often a blur or pixelate patch is rebuilt while its box is being dragged.
+const DRAG_REGEN: Duration = Duration::from_millis(33);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
@@ -219,7 +222,9 @@ enum Gesture {
     },
     Move {
         start: Pt,
-        originals: Vec<Element>,
+        ids: Vec<u64>,
+        /// The total offset already applied, so each event translates by the delta alone.
+        applied: Pt,
     },
     Resize {
         id: u64,
@@ -243,6 +248,7 @@ enum Gesture {
 struct EffectImage {
     key: (RectI, u32, bool),
     image: Arc<RenderImage>,
+    regen_at: Instant,
 }
 
 struct TextEdit {
@@ -272,6 +278,7 @@ struct Scene {
 pub struct Editor {
     doc: Doc,
     base: Arc<RenderImage>,
+    doc_base: Option<Arc<RgbaImage>>,
     pub(super) tool: Tool,
     pub(super) style: Style,
     selection: Vec<u64>,
@@ -299,9 +306,15 @@ impl Editor {
     ) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
+        let (width, height) = image.dimensions();
+        let gpu = imaging::render_image(match Arc::try_unwrap(image) {
+            Ok(image) => image,
+            Err(image) => (*image).clone(),
+        });
         Self {
-            base: imaging::render_image((*image).clone()),
-            doc: Doc::new(image),
+            base: gpu,
+            doc: Doc::new(width, height),
+            doc_base: None,
             tool: Tool::Arrow,
             style: Style {
                 color: PALETTE[0],
@@ -330,6 +343,28 @@ impl Editor {
 
     pub(super) fn can_undo(&self) -> bool {
         self.doc.can_undo()
+    }
+
+    /// The capture as RGBA for CPU work, rebuilt once from the BGRA image GPUI paints.
+    fn cpu_base(&mut self) -> Arc<RgbaImage> {
+        if let Some(base) = self.doc_base.clone() {
+            return base;
+        }
+        let full = self.doc.full();
+        let mut bytes = self
+            .base
+            .as_bytes(0)
+            .expect("the base image has a frame")
+            .to_vec();
+        for pixel in bytes.as_chunks_mut::<4>().0 {
+            pixel.swap(0, 2);
+        }
+        let base = Arc::new(
+            RgbaImage::from_raw(full.w as u32, full.h as u32, bytes)
+                .expect("the base image is sized"),
+        );
+        self.doc_base = Some(base.clone());
+        base
     }
 
     pub(super) fn can_redo(&self) -> bool {
@@ -842,7 +877,8 @@ impl Editor {
         self.doc.checkpoint();
         self.gesture = Some(Gesture::Move {
             start: p,
-            originals: self.selected().cloned().collect(),
+            ids: self.selection.clone(),
+            applied: pt(0.0, 0.0),
         });
     }
 
@@ -878,20 +914,27 @@ impl Editor {
                     Arc::make_mut(points).push(p);
                 }
             }
-            Gesture::Move { start, originals } => {
-                let (mut dx, mut dy) = (p.x - start.x, p.y - start.y);
+            Gesture::Move {
+                start,
+                ids,
+                applied,
+            } => {
+                let (mut tx, mut ty) = (p.x - start.x, p.y - start.y);
                 if constrain {
-                    if dx.abs() > dy.abs() {
-                        dy = 0.0;
+                    if tx.abs() > ty.abs() {
+                        ty = 0.0;
                     } else {
-                        dx = 0.0;
+                        tx = 0.0;
                     }
                 }
-                for original in originals.iter() {
-                    if let Some(element) = self.doc.get_mut(original.id) {
-                        *element = original.clone();
-                        element.translate(dx, dy);
+                let (dx, dy) = (tx - applied.x, ty - applied.y);
+                if dx != 0.0 || dy != 0.0 {
+                    for id in ids.iter() {
+                        if let Some(element) = self.doc.get_mut(*id) {
+                            element.translate(dx, dy);
+                        }
                     }
+                    *applied = pt(tx, ty);
                 }
             }
             Gesture::Resize {
@@ -1045,7 +1088,7 @@ impl Editor {
             let _ = std::fs::create_dir_all(&config.save_dir);
             cx.prompt_for_new_path(&config.save_dir, Some("bawkshot.png"))
         });
-        let (base, crop) = (self.doc.base.clone(), self.doc.crop);
+        let (base, crop) = (self.cpu_base(), self.doc.crop);
         let elements = self.doc.elements.clone();
         let untouched = elements.is_empty() && crop == self.doc.full();
         let metrics = paint::text_metrics(window);
@@ -1109,9 +1152,25 @@ impl Editor {
         .detach();
     }
 
+    /// The ids an active gesture is reshaping, so their effect patches can throttle.
+    fn dragging_ids(&self) -> Vec<u64> {
+        match &self.gesture {
+            Some(Gesture::Draw { id, .. }) | Some(Gesture::Resize { id, .. }) => vec![*id],
+            Some(Gesture::Move { ids, .. }) => ids.clone(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Rebuilds the blurred and pixelated patches whose area or strength changed.
     fn sync_effects(&mut self) {
         let full = self.doc.full();
+        let base = self
+            .doc
+            .elements
+            .iter()
+            .any(|el| el.is_effect())
+            .then(|| self.cpu_base());
+        let dragging = self.dragging_ids();
         let mut alive = Vec::new();
         for element in &self.doc.elements {
             let (rect, pixelate) = match &element.shape {
@@ -1128,10 +1187,24 @@ impl Editor {
             {
                 continue;
             }
-            let fresh = effects::patch(&self.doc.base, element).map(|(_, patch)| EffectImage {
-                key,
-                image: imaging::render_image(patch),
-            });
+            // A dragged box repaints at frame rate anyway, so a fresh patch buys
+            // little until the drag settles.
+            if dragging.contains(&element.id)
+                && self
+                    .effects
+                    .get(&element.id)
+                    .is_some_and(|effect| effect.regen_at.elapsed() < DRAG_REGEN)
+            {
+                continue;
+            }
+            let fresh = base
+                .as_deref()
+                .and_then(|base| effects::patch(base, element))
+                .map(|(_, patch)| EffectImage {
+                    key,
+                    image: imaging::render_image(patch),
+                    regen_at: Instant::now(),
+                });
             let stale = match fresh {
                 Some(effect) => self.effects.insert(element.id, effect),
                 None => self.effects.remove(&element.id),
@@ -1487,6 +1560,42 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn a_blur_builds_a_patch_and_the_rgba_base_back(cx: &mut TestAppContext) {
+        let (view, cx) = editor(cx);
+        cx.simulate_keystrokes("b");
+        drag(&view, cx, &[(40.0, 40.0), (140.0, 120.0)], Modifiers::none());
+        assert_eq!(view.read_with(cx, |editor, _| editor.effects.len()), 1);
+        let base = view
+            .read_with(cx, |editor, _| editor.doc_base.clone())
+            .expect("the rgba base is materialized for effects");
+        assert_eq!(base.dimensions(), (400, 300));
+    }
+
+    #[gpui_kit::test]
+    fn dragging_a_blur_throttles_its_patch_until_the_release(cx: &mut TestAppContext) {
+        let (view, cx) = editor(cx);
+        cx.simulate_keystrokes("b");
+        let start = at(&view, cx, (50.0, 50.0));
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        let step = at(&view, cx, (100.0, 100.0));
+        cx.simulate_mouse_move(step, MouseButton::Left, Modifiers::none());
+        let first = view.read_with(cx, |editor, _| {
+            editor.effects.values().next().map(|effect| effect.key)
+        });
+        let more = at(&view, cx, (140.0, 140.0));
+        cx.simulate_mouse_move(more, MouseButton::Left, Modifiers::none());
+        let second = view.read_with(cx, |editor, _| {
+            editor.effects.values().next().map(|effect| effect.key)
+        });
+        assert_eq!(first, second, "an immediate second drag step reuses the patch");
+        cx.simulate_mouse_up(more, MouseButton::Left, Modifiers::none());
+        let released = view.read_with(cx, |editor, _| {
+            editor.effects.values().next().map(|effect| effect.key)
+        });
+        assert_ne!(first, released, "the release gives the exact patch");
+    }
+
+    #[gpui_kit::test]
     fn a_drag_draws_an_arrow_that_undo_and_redo_follow(cx: &mut TestAppContext) {
         let (view, cx) = editor(cx);
         drag(
@@ -1680,6 +1789,42 @@ mod tests {
         };
         assert_eq!(points.len(), 4);
         assert!(view.read_with(cx, |editor, _| editor.selection.is_empty()));
+    }
+
+    #[gpui_kit::test]
+    fn a_moved_stroke_lands_exactly_where_the_drag_pointed(cx: &mut TestAppContext) {
+        let (view, cx) = editor(cx);
+        cx.simulate_keystrokes("p");
+        drag(
+            &view,
+            cx,
+            &[(40.0, 40.0), (80.0, 60.0), (120.0, 40.0)],
+            Modifiers::none(),
+        );
+        cx.simulate_keystrokes("v");
+        drag(
+            &view,
+            cx,
+            &[(60.0, 50.0), (70.0, 55.0), (90.0, 90.0)],
+            Modifiers::none(),
+        );
+        let drawn = elements(&view, cx);
+        let Shape::Pen(points) = &drawn[0].shape else {
+            panic!("expected a pen stroke, got {:?}", drawn[0].shape);
+        };
+        assert_eq!(
+            points.as_slice(),
+            &[pt(70.0, 80.0), pt(110.0, 100.0), pt(150.0, 80.0)]
+        );
+        cx.simulate_keystrokes("ctrl-z");
+        let restored = elements(&view, cx);
+        let Shape::Pen(points) = &restored[0].shape else {
+            panic!("expected a pen stroke, got {:?}", restored[0].shape);
+        };
+        assert_eq!(
+            points.as_slice(),
+            &[pt(40.0, 40.0), pt(80.0, 60.0), pt(120.0, 40.0)]
+        );
     }
 
     #[gpui_kit::test]

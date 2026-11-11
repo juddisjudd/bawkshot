@@ -1,7 +1,3 @@
-use std::sync::Arc;
-
-use image::RgbaImage;
-
 use super::element::{Element, Shape};
 use crate::geom::RectI;
 
@@ -15,7 +11,8 @@ struct Snapshot {
 
 /// A capture and the markup on it. Effects stay below every other element, as they are drawn.
 pub struct Doc {
-    pub base: Arc<RgbaImage>,
+    width: u32,
+    height: u32,
     pub elements: Vec<Element>,
     pub crop: RectI,
     next_id: u64,
@@ -24,10 +21,11 @@ pub struct Doc {
 }
 
 impl Doc {
-    pub fn new(base: Arc<RgbaImage>) -> Self {
-        let crop = RectI::new(0, 0, base.width() as i32, base.height() as i32);
+    pub fn new(width: u32, height: u32) -> Self {
+        let crop = RectI::new(0, 0, width as i32, height as i32);
         Self {
-            base,
+            width,
+            height,
             elements: Vec::new(),
             crop,
             next_id: 1,
@@ -37,7 +35,7 @@ impl Doc {
     }
 
     pub fn full(&self) -> RectI {
-        RectI::new(0, 0, self.base.width() as i32, self.base.height() as i32)
+        RectI::new(0, 0, self.width as i32, self.height as i32)
     }
 
     pub fn next_id(&mut self) -> u64 {
@@ -171,7 +169,7 @@ mod tests {
     use crate::geom::{RectF, pt};
 
     fn doc() -> Doc {
-        Doc::new(Arc::new(RgbaImage::new(40, 30)))
+        Doc::new(40, 30)
     }
 
     fn element(doc: &mut Doc, shape: Shape) -> Element {

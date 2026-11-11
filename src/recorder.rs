@@ -355,24 +355,34 @@ impl Recording {
     }
 
     /// Ends the frame supply, which closes ffmpeg's input, and waits for ffmpeg to finish its file; true when it ended cleanly.
-    fn stop(&mut self) -> bool {
+    fn stop(&mut self, timeout: Duration) -> bool {
         self.stop.store(true, Ordering::Relaxed);
+        let deadline = Instant::now() + timeout;
+        // A stalled encoder leaves the pump blocked inside its pipe write and ffmpeg
+        // stuck on its file; the kill breaks the pipe so both sides end within the timeout.
+        while Instant::now() < deadline
+            && (self.pump.as_ref().is_some_and(|pump| !pump.is_finished())
+                || self
+                    .child
+                    .try_wait()
+                    .is_ok_and(|state| state.is_none()))
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if self.pump.as_ref().is_some_and(|pump| !pump.is_finished())
+            || self
+                .child
+                .try_wait()
+                .is_ok_and(|state| state.is_none())
+        {
+            self.kill();
+        }
         if let Some(pump) = self.pump.take() {
             let _ = pump.join();
         }
-        let deadline = Instant::now() + STOP_TIMEOUT;
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(status)) => return status.success(),
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(20))
-                }
-                _ => {
-                    self.kill();
-                    return false;
-                }
-            }
-        }
+        self.child
+            .try_wait()
+            .is_ok_and(|state| state.is_some_and(|status| status.success()))
     }
 
     fn encode_gif(&self) -> Result<(), String> {
@@ -395,7 +405,7 @@ impl Recording {
 
     /// Stops the capture. Returns the saved file, or `None` when the recording was thrown away. Blocks until done.
     pub fn finish(mut self, keep: bool) -> Result<Option<PathBuf>, String> {
-        let clean = self.stop();
+        let clean = self.stop(STOP_TIMEOUT);
         let captured = fs::metadata(&self.capture).is_ok_and(|file| file.len() > 0);
         if !keep {
             let _ = fs::remove_file(&self.capture);
@@ -617,6 +627,51 @@ mod tests {
         };
         assert!(!complaint.is_empty());
         assert!(recording.finish(true).is_err());
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    /// A stalled encoder never reads its input, so the pump wedges inside its pipe write.
+    /// `ping` never reads stdin and runs far past the test, so it stands in for ffmpeg.
+    #[test]
+    fn a_stalled_encoder_cannot_hang_the_stop() {
+        let folder = scratch("stall");
+        let mut child = Command::new("ping")
+            .args(["-n", "100000", "127.0.0.1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let mut pipe = child.stdin.take().unwrap();
+        let frame = vec![0u8; SIZE.0 as usize * SIZE.1 as usize * 4];
+        let pump = std::thread::spawn(move || {
+            while !stopped.load(Ordering::Relaxed) {
+                if pipe.write_all(&frame).is_err() {
+                    return;
+                }
+            }
+        });
+        let mut recording = Recording {
+            child,
+            job: None,
+            pump: Some(pump),
+            stop,
+            ffmpeg: Ffmpeg::with_encoders("ping".into(), ""),
+            format: RecordFormat::Video,
+            capture: folder.join("clip.mp4"),
+            output: folder.join("clip.mp4"),
+            log: folder.join("ffmpeg.log"),
+        };
+        let began = Instant::now();
+        assert!(!recording.stop(Duration::from_secs(2)));
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "stop took {:?}",
+            began.elapsed()
+        );
         fs::remove_dir_all(folder).unwrap();
     }
 }

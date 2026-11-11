@@ -130,7 +130,7 @@ pub struct Shell {
     last_saved: Option<PathBuf>,
     settings: Option<AnyWindowHandle>,
     tray: Option<Tray>,
-    _subscriptions: [Subscription; 3],
+    _subscriptions: [Subscription; 4],
 }
 
 struct ShellHandle(Entity<Shell>);
@@ -318,6 +318,10 @@ impl Shell {
                 tray.settings.set_text(label);
             }
         });
+        let this = cx.entity();
+        let closed = cx.on_window_closed(move |cx, id| {
+            this.update(cx, |shell, _| region_window_closed(&mut shell.region, id));
+        });
 
         let mut this = Self {
             tray: build_tray(&commands),
@@ -334,7 +338,7 @@ impl Shell {
             ffmpeg: None,
             last_saved: None,
             settings: None,
-            _subscriptions: [quit, found, changed],
+            _subscriptions: [quit, found, changed, closed],
         };
         this.register_hotkeys();
         if !this.hotkey_errors.is_empty() {
@@ -923,6 +927,18 @@ impl Shell {
     }
 }
 
+/// Clears the region session once all of its overlay windows are gone, so windows that
+/// close without a pick or a cancel cannot pin the capture and block the next one.
+fn region_window_closed(region: &mut Option<RegionSession>, id: WindowId) {
+    let Some(session) = region.as_mut() else {
+        return;
+    };
+    session.windows.retain(|window| window.window_id() != id);
+    if session.windows.is_empty() {
+        *region = None;
+    }
+}
+
 fn close_pill(pill: Option<WindowHandle<RecordingPill>>, cx: &mut App) {
     if let Some(pill) = pill {
         let _ = pill.update(cx, |_, window, _| window.remove_window());
@@ -1015,8 +1031,13 @@ pub fn notify(title: &str, body: &str, cx: &App) {
 
 #[cfg(test)]
 mod tests {
-    use super::pill_position;
+    use super::{RegionSession, Purpose, imaging, pill_position, region_window_closed};
     use crate::geom::RectI;
+    use crate::overlay::RegionOverlay;
+    use crate::platform;
+    use gpui_kit::{AppContext, TestAppContext};
+    use image::RgbaImage;
+    use std::rc::Rc;
 
     const MONITOR: RectI = RectI {
         x: 0,
@@ -1042,5 +1063,44 @@ mod tests {
         assert_eq!(pill_position(MONITOR, MONITOR, 1.0), (10, 1030));
         let right_edge = RectI::new(1800, 200, 120, 300);
         assert_eq!(pill_position(right_edge, MONITOR, 1.0).0, 1694);
+    }
+
+    #[gpui_kit::test]
+    fn a_region_session_ends_only_when_its_last_overlay_window_closes(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::theme::init(cx);
+        });
+        let (first, second) = cx.update(|cx| {
+            let mut open = |id: u64| {
+                let frame = imaging::render_image(RgbaImage::new(8, 8));
+                let monitor = platform::Monitor {
+                    id,
+                    rect: MONITOR,
+                    scale: 1.0,
+                };
+                cx.open_window(gpui_kit::WindowOptions::default(), move |window, cx| {
+                    cx.new(|cx| {
+                        RegionOverlay::new(frame, monitor, Rc::new(Vec::new()), window, cx)
+                    })
+                })
+                .expect("the overlay opens")
+                .into()
+            };
+            (open(1), open(2))
+        });
+        let mut region = Some(RegionSession {
+            shot: RgbaImage::new(8, 8),
+            area: MONITOR,
+            purpose: Purpose::Capture,
+            windows: vec![first, second],
+            _subscriptions: Vec::new(),
+        });
+        region_window_closed(&mut region, first.window_id());
+        assert!(region.is_some(), "the session holds while a window is open");
+        region_window_closed(&mut region, second.window_id());
+        assert!(region.is_none(), "the session ends with the last window");
+        region_window_closed(&mut region, first.window_id());
+        assert!(region.is_none(), "a closed session stays closed");
     }
 }

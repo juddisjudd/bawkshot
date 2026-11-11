@@ -261,7 +261,10 @@ impl Element {
                 *b = b.offset(dx, dy);
             }
             Shape::Pen(points) | Shape::Highlighter(points) => {
-                *points = Arc::new(points.iter().map(|p| p.offset(dx, dy)).collect());
+                let points = Arc::make_mut(points);
+                for p in points.iter_mut() {
+                    *p = p.offset(dx, dy);
+                }
             }
             Shape::Text { origin, .. } => *origin = origin.offset(dx, dy),
             Shape::Step { center, .. } => *center = center.offset(dx, dy),
