@@ -29,7 +29,7 @@ const HANDLE_REACH: f32 = 8.0;
 const HIT_SLOP: f32 = 5.0;
 const MIN_ZOOM: f32 = 0.05;
 const MAX_ZOOM: f32 = 32.0;
-/// How often a blur or pixelate patch is rebuilt while its box is being dragged.
+/// The least time between rebuilds of a blur or pixelate patch while its box is dragged; a slow patch waits longer.
 const DRAG_REGEN: Duration = Duration::from_millis(33);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,6 +249,7 @@ struct EffectImage {
     key: (RectI, u32, bool),
     image: Arc<RenderImage>,
     regen_at: Instant,
+    cost: Duration,
 }
 
 struct TextEdit {
@@ -1190,13 +1191,13 @@ impl Editor {
             // A dragged box repaints at frame rate anyway, so a fresh patch buys
             // little until the drag settles.
             if dragging.contains(&element.id)
-                && self
-                    .effects
-                    .get(&element.id)
-                    .is_some_and(|effect| effect.regen_at.elapsed() < DRAG_REGEN)
+                && self.effects.get(&element.id).is_some_and(|effect| {
+                    effect.regen_at.elapsed() < DRAG_REGEN.max(effect.cost * 2)
+                })
             {
                 continue;
             }
+            let began = Instant::now();
             let fresh = base
                 .as_deref()
                 .and_then(|base| effects::patch(base, element))
@@ -1204,6 +1205,7 @@ impl Editor {
                     key,
                     image: imaging::render_image(patch),
                     regen_at: Instant::now(),
+                    cost: began.elapsed(),
                 });
             let stale = match fresh {
                 Some(effect) => self.effects.insert(element.id, effect),
@@ -1563,7 +1565,12 @@ mod tests {
     fn a_blur_builds_a_patch_and_the_rgba_base_back(cx: &mut TestAppContext) {
         let (view, cx) = editor(cx);
         cx.simulate_keystrokes("b");
-        drag(&view, cx, &[(40.0, 40.0), (140.0, 120.0)], Modifiers::none());
+        drag(
+            &view,
+            cx,
+            &[(40.0, 40.0), (140.0, 120.0)],
+            Modifiers::none(),
+        );
         assert_eq!(view.read_with(cx, |editor, _| editor.effects.len()), 1);
         let base = view
             .read_with(cx, |editor, _| editor.doc_base.clone())
@@ -1587,12 +1594,34 @@ mod tests {
         let second = view.read_with(cx, |editor, _| {
             editor.effects.values().next().map(|effect| effect.key)
         });
-        assert_eq!(first, second, "an immediate second drag step reuses the patch");
+        assert_eq!(
+            first, second,
+            "an immediate second drag step reuses the patch"
+        );
         cx.simulate_mouse_up(more, MouseButton::Left, Modifiers::none());
         let released = view.read_with(cx, |editor, _| {
             editor.effects.values().next().map(|effect| effect.key)
         });
         assert_ne!(first, released, "the release gives the exact patch");
+    }
+
+    #[gpui_kit::test]
+    fn a_closed_editor_lets_go_of_its_capture(cx: &mut TestAppContext) {
+        let (view, cx) = editor(cx);
+        cx.simulate_keystrokes("b");
+        drag(
+            &view,
+            cx,
+            &[(40.0, 40.0), (140.0, 120.0)],
+            Modifiers::none(),
+        );
+        cx.simulate_keystrokes("t");
+        click(&view, cx, (200.0, 200.0));
+        let weak = view.downgrade();
+        cx.update(|window, _| window.remove_window());
+        drop(view);
+        cx.run_until_parked();
+        assert!(weak.upgrade().is_none(), "the editor outlived its window");
     }
 
     #[gpui_kit::test]

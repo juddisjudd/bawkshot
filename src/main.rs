@@ -112,6 +112,7 @@ fn main() {
         return;
     };
     updater::clean_up();
+    recorder::clean_up();
     updater::sync_installed_version();
     platform::discard_launch_show_state();
     application()

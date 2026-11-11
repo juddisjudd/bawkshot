@@ -547,6 +547,10 @@ impl Shell {
 
     /// Freezes the screen and opens one overlay per monitor to choose an area on.
     fn pick_region(&mut self, purpose: Purpose, cx: &mut Context<Self>) {
+        // Two commands can both pass the check in `run` before either gets here.
+        if self.region.is_some() {
+            return;
+        }
         let area = platform::virtual_screen();
         let Some(shot) = platform::grab(area, self.config.capture_cursor) else {
             notify("capture failed", "windows refused to copy the screen.", cx);
@@ -1031,7 +1035,7 @@ pub fn notify(title: &str, body: &str, cx: &App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{RegionSession, Purpose, imaging, pill_position, region_window_closed};
+    use super::{Purpose, RegionSession, imaging, pill_position, region_window_closed};
     use crate::geom::RectI;
     use crate::overlay::RegionOverlay;
     use crate::platform;
@@ -1080,9 +1084,7 @@ mod tests {
                     scale: 1.0,
                 };
                 cx.open_window(gpui_kit::WindowOptions::default(), move |window, cx| {
-                    cx.new(|cx| {
-                        RegionOverlay::new(frame, monitor, Rc::new(Vec::new()), window, cx)
-                    })
+                    cx.new(|cx| RegionOverlay::new(frame, monitor, Rc::new(Vec::new()), window, cx))
                 })
                 .expect("the overlay opens")
                 .into()

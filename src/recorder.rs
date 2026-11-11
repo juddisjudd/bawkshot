@@ -14,7 +14,8 @@ use crate::platform::{Grabber, Job, WindowState, window_state};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
-const GIF_FILTER: &str = "split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle";
+const GIF_PALETTE: &str = "palettegen=stats_mode=diff";
+const GIF_DITHER: &str = "paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle";
 
 /// Where ffmpeg may live, best guess first. A path set by hand is the only place looked.
 fn candidates(custom: &str) -> Vec<PathBuf> {
@@ -61,6 +62,29 @@ pub fn locate(custom: &str) -> Option<PathBuf> {
         .into_iter()
         .find(|path| path.is_file())
         .map(unshim)
+}
+
+/// Whether `name` is a gif capture or its palette, as `Recording::start` names them in the temp folder.
+fn is_leftover(name: &str) -> bool {
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    name.strip_suffix(".mkv")
+        .or_else(|| name.strip_suffix(".png"))
+        .and_then(|stem| stem.strip_prefix("bawkshot-")?.split_once('-'))
+        .is_some_and(|(pid, stamp)| digits(pid) && digits(stamp))
+}
+
+/// Removes the gif captures a killed copy left in the temp folder. Only one copy runs, so none is in use.
+pub fn clean_up() {
+    std::thread::spawn(|| {
+        let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if entry.file_name().to_str().is_some_and(is_leftover) {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    });
 }
 
 /// An ffmpeg binary, and which of the encoders the recorder prefers it was built with.
@@ -362,18 +386,12 @@ impl Recording {
         // stuck on its file; the kill breaks the pipe so both sides end within the timeout.
         while Instant::now() < deadline
             && (self.pump.as_ref().is_some_and(|pump| !pump.is_finished())
-                || self
-                    .child
-                    .try_wait()
-                    .is_ok_and(|state| state.is_none()))
+                || self.child.try_wait().is_ok_and(|state| state.is_none()))
         {
             std::thread::sleep(Duration::from_millis(20));
         }
         if self.pump.as_ref().is_some_and(|pump| !pump.is_finished())
-            || self
-                .child
-                .try_wait()
-                .is_ok_and(|state| state.is_none())
+            || self.child.try_wait().is_ok_and(|state| state.is_none())
         {
             self.kill();
         }
@@ -385,22 +403,45 @@ impl Recording {
             .is_ok_and(|state| state.is_some_and(|status| status.success()))
     }
 
-    fn encode_gif(&self) -> Result<(), String> {
-        let output = Command::new(&self.ffmpeg.path)
-            .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
-            .arg(&self.capture)
-            .args(["-vf", GIF_FILTER, "-loop", "0"])
-            .arg(&self.output)
+    fn gif_pass(&self, arguments: impl FnOnce(&mut Command)) -> Result<(), String> {
+        let mut pass = Command::new(&self.ffmpeg.path);
+        pass.args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&self.capture);
+        arguments(&mut pass);
+        let output = pass
             .stdin(Stdio::null())
+            .stdout(Stdio::null())
             .creation_flags(CREATE_NO_WINDOW)
             .output()
             .map_err(|err| format!("could not run the gif pass: {err}"))?;
         if output.status.success() {
             return Ok(());
         }
-        let _ = fs::remove_file(&self.output);
         Err(last_line(&String::from_utf8_lossy(&output.stderr))
             .unwrap_or_else(|| "the gif pass failed.".into()))
+    }
+
+    /// Two passes, because one filter graph holds every frame in memory until the palette is done.
+    fn encode_gif(&self) -> Result<(), String> {
+        let palette = self.capture.with_extension("png");
+        let encoded = self
+            .gif_pass(|pass| {
+                pass.args(["-vf", GIF_PALETTE, "-frames:v", "1", "-update", "1"])
+                    .arg(&palette);
+            })
+            .and_then(|()| {
+                self.gif_pass(|pass| {
+                    pass.arg("-i")
+                        .arg(&palette)
+                        .args(["-lavfi", GIF_DITHER, "-loop", "0"])
+                        .arg(&self.output);
+                })
+            });
+        let _ = fs::remove_file(&palette);
+        if encoded.is_err() {
+            let _ = fs::remove_file(&self.output);
+        }
+        encoded
     }
 
     /// Stops the capture. Returns the saved file, or `None` when the recording was thrown away. Blocks until done.
@@ -500,6 +541,16 @@ mod tests {
     }
 
     #[test]
+    fn only_gif_captures_and_palettes_count_as_leftovers() {
+        assert!(is_leftover("bawkshot-4312-101502123.mkv"));
+        assert!(is_leftover("bawkshot-4312-101502123.png"));
+        assert!(!is_leftover("bawkshot-4312-0.update"));
+        assert!(!is_leftover("bawkshot-test-4312-gif.mkv"));
+        assert!(!is_leftover("bawkshot-4312.mkv"));
+        assert!(!is_leftover("holiday-4312-101502123.mkv"));
+    }
+
+    #[test]
     fn odd_sizes_are_trimmed_to_even() {
         assert_eq!(even(RectI::new(3, 5, 801, 599)), RectI::new(3, 5, 800, 598));
     }
@@ -585,8 +636,10 @@ mod tests {
             return;
         };
         std::thread::sleep(Duration::from_millis(1200));
+        let palette = recording.capture.with_extension("png");
         let saved = recording.finish(true).unwrap().expect("a kept recording");
         assert_eq!(&fs::read(saved).unwrap()[..6], b"GIF89a");
+        assert!(!palette.exists(), "the palette is temporary");
         fs::remove_dir_all(folder).unwrap();
     }
 

@@ -523,13 +523,20 @@ fn tab_bar(tab: Tab, p: &Palette, cx: &mut Context<SettingsView>) -> Div {
         .border_1()
         .border_color(p.border_weak)
         .children(Tab::ALL.map(|category| {
-            segment(("settings-tab", category as usize), category.label(), category == tab, p)
-                .py(px(4.))
-                .when(category == tab, |this| this.font_weight(FontWeight::SEMIBOLD))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.tab = category;
-                    cx.notify();
-                }))
+            segment(
+                ("settings-tab", category as usize),
+                category.label(),
+                category == tab,
+                p,
+            )
+            .py(px(4.))
+            .when(category == tab, |this| {
+                this.font_weight(FontWeight::SEMIBOLD)
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.tab = category;
+                cx.notify();
+            }))
         }))
 }
 
@@ -765,7 +772,12 @@ impl Render for SettingsView {
             .child(
                 div().flex_1().min_h_0().child(
                     div().size_full().overflow_y_scrollbar().child(
-                        div().flex().flex_col().gap(px(14.)).p(px(28.)).child(content),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(14.))
+                            .p(px(28.))
+                            .child(content),
                     ),
                 ),
             )
