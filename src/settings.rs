@@ -26,10 +26,41 @@ pub struct SettingsView {
     autostart_error: Option<String>,
     updates: Entity<Updates>,
     update: UpdateState,
+    tab: Tab,
     save_dir: Entity<InputState>,
     ffmpeg_path: Entity<InputState>,
     hotkeys: Vec<(Trigger, Entity<InputState>)>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// What one settings tab holds, one category at a time to keep the window short.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Capture,
+    Recording,
+    Hotkeys,
+    App,
+    About,
+}
+
+impl Tab {
+    const ALL: [Tab; 5] = [
+        Tab::Capture,
+        Tab::Recording,
+        Tab::Hotkeys,
+        Tab::App,
+        Tab::About,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Tab::Capture => "capture",
+            Tab::Recording => "recording",
+            Tab::Hotkeys => "hotkeys",
+            Tab::App => "app",
+            Tab::About => "about",
+        }
+    }
 }
 
 pub fn open(
@@ -38,10 +69,10 @@ pub fn open(
     updates: Entity<Updates>,
     cx: &mut App,
 ) -> Option<AnyWindowHandle> {
-    let bounds = Bounds::centered(None, size(px(640.), px(760.)), cx);
+    let bounds = Bounds::centered(None, size(px(600.), px(580.)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size(px(540.), px(420.))),
+        window_min_size: Some(size(px(540.), px(480.))),
         app_id: Some("bawkshot".into()),
         ..TitleBar::window_options()
     };
@@ -147,6 +178,7 @@ impl SettingsView {
             updates,
             config,
             errors,
+            tab: Tab::Capture,
             save_dir,
             ffmpeg_path,
             hotkeys,
@@ -428,16 +460,6 @@ fn button(id: &'static str, label: &'static str, primary: bool, p: &Palette) -> 
         })
 }
 
-fn section(title: &'static str, p: &Palette) -> Div {
-    div().flex().flex_col().gap(px(14.)).child(
-        div()
-            .text_size(px(11.))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(p.text_weaker)
-            .child(title),
-    )
-}
-
 fn row(label: &'static str, detail: &'static str, p: &Palette) -> Div {
     div().flex().items_center().justify_between().gap_4().child(
         div()
@@ -491,13 +513,45 @@ fn segment(
         .child(label.into())
 }
 
+fn tab_bar(tab: Tab, p: &Palette, cx: &mut Context<SettingsView>) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .gap(px(2.))
+        .p(px(3.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(p.border_weak)
+        .children(Tab::ALL.map(|category| {
+            segment(("settings-tab", category as usize), category.label(), category == tab, p)
+                .py(px(4.))
+                .when(category == tab, |this| this.font_weight(FontWeight::SEMIBOLD))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.tab = category;
+                    cx.notify();
+                }))
+        }))
+}
+
 impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let config = self.config.clone();
         let errors = self.errors.clone();
 
-        let after = section("after a capture", &p)
+        let capture = div()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .child(Self::toggle(
+                "cursor",
+                "include the mouse pointer",
+                "draws the pointer into a screenshot.",
+                config.capture_cursor,
+                |config, on| config.capture_cursor = on,
+                &p,
+                cx,
+            ))
             .child(Self::toggle(
                 "open-editor",
                 "open the editor",
@@ -534,16 +588,6 @@ impl Render for SettingsView {
                 cx,
             ));
 
-        let capture = section("capture", &p).child(Self::toggle(
-            "cursor",
-            "include the mouse pointer",
-            "draws the pointer into a screenshot.",
-            config.capture_cursor,
-            |config, on| config.capture_cursor = on,
-            &p,
-            cx,
-        ));
-
         let ffmpeg = match &self.ffmpeg {
             Some(path) => note(format!("using {}", path.display()), p.text_weak),
             None if config.ffmpeg_path.trim().is_empty() => note(
@@ -552,7 +596,10 @@ impl Render for SettingsView {
             ),
             None => note("there is no file at that path.", p.danger),
         };
-        let recording = section("recording", &p)
+        let recording = div()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
             .child(
                 div()
                     .flex()
@@ -599,7 +646,10 @@ impl Render for SettingsView {
                 cx,
             ));
 
-        let hotkeys = section("hotkeys", &p)
+        let hotkeys = div()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
             .child(note(
                 "written like ctrl+shift+printscreen or alt+f9. press enter to apply, leave empty for none.",
                 p.text_weak,
@@ -621,7 +671,10 @@ impl Render for SettingsView {
             }));
 
         let autostart = self.autostart;
-        let app = section("app", &p)
+        let app = div()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
             .child(
                 row(
                     "start with windows",
@@ -650,7 +703,10 @@ impl Render for SettingsView {
                 ),
             );
 
-        let about = section("about", &p)
+        let about = div()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
             .child(self.update_row(&p))
             .child(Self::toggle(
                 "check-updates",
@@ -675,6 +731,14 @@ impl Render for SettingsView {
                     .child("settings"),
             );
 
+        let content = match self.tab {
+            Tab::Capture => capture,
+            Tab::Recording => recording,
+            Tab::Hotkeys => hotkeys,
+            Tab::App => app,
+            Tab::About => about,
+        };
+
         div()
             .size_full()
             .flex()
@@ -690,19 +754,18 @@ impl Render for SettingsView {
                     .child(title),
             )
             .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .px(px(28.))
+                    .pt(px(14.))
+                    .pb(px(6.))
+                    .child(tab_bar(self.tab, &p, cx)),
+            )
+            .child(
                 div().flex_1().min_h_0().child(
                     div().size_full().overflow_y_scrollbar().child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(30.))
-                            .p(px(28.))
-                            .child(after)
-                            .child(capture)
-                            .child(recording)
-                            .child(hotkeys)
-                            .child(app)
-                            .child(about),
+                        div().flex().flex_col().gap(px(14.)).p(px(28.)).child(content),
                     ),
                 ),
             )

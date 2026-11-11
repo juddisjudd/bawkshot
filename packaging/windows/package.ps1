@@ -5,7 +5,12 @@ Set-Location (Split-Path (Split-Path $PSScriptRoot))
 $exe = "target/release/bawkshot.exe"
 if (-not (Test-Path $exe)) { throw "Build first: cargo build --release" }
 $iscc = Get-Command iscc -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
-if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+if (-not $iscc) {
+    $iscc = @(
+        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+        "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
 if (-not (Test-Path $iscc)) { throw "Inno Setup 6 was not found. Get it from https://jrsoftware.org/isdl.php" }
 
 $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
