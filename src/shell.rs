@@ -320,7 +320,11 @@ impl Shell {
         });
         let this = cx.entity();
         let closed = cx.on_window_closed(move |cx, id| {
-            this.update(cx, |shell, _| region_window_closed(&mut shell.region, id));
+            // A window removed inside a shell update reports its close while the shell is still borrowed.
+            let this = this.clone();
+            cx.defer(move |cx| {
+                this.update(cx, |shell, _| region_window_closed(&mut shell.region, id));
+            });
         });
 
         let mut this = Self {
